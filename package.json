@@ -1,0 +1,24 @@
+{
+  "name": "naologic-erp",
+  "version": "1.0.0",
+  "description": "",
+  "homepage": "https://github.com/tom5191/naologic-erp#readme",
+  "bugs": {
+    "url": "https://github.com/tom5191/naologic-erp/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tom5191/naologic-erp.git"
+  },
+  "license": "ISC",
+  "author": "Thomas Horner",
+  "type": "commonjs",
+  "main": "index.ts",
+  "scripts": {
+    "test": "test"
+  },
+  "dependencies": {
+    "luxon": "^3.7.2"
+  },
+  "devDependencies": {}
+}
