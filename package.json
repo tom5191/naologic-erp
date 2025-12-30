@@ -1,6 +1,7 @@
 {
   "name": "naologic-erp",
   "version": "1.0.0",
+  "type": "module",
   "description": "",
   "homepage": "https://github.com/tom5191/naologic-erp#readme",
   "bugs": {
@@ -12,13 +13,16 @@
   },
   "license": "ISC",
   "author": "Thomas Horner",
-  "type": "commonjs",
   "main": "index.ts",
   "scripts": {
     "test": "test"
   },
   "dependencies": {
-    "luxon": "^3.7.2"
+    "luxon": "^3.7.2",
+    "typescript": "^5.9.3"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@tsconfig/node22": "^22.0.5",
+    "@types/luxon": "^3.7.1"
+  }
 }
