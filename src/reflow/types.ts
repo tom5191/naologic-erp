@@ -41,6 +41,7 @@ export type Shift = {
   startHour: number;
   endHour: number;
 }
+
 export type MaintenanceWindow = {
   startDate: string;
   endDate: string;
@@ -69,6 +70,9 @@ export type ManufacturingOrder = {
 export type ReflowResult = {
   success: boolean;
   updatedWorkOrders: Schedule;
+  changes: ScheduleChange[];
+  explanation: string;
+  errors?: string[];
 }
 
 export type ReflowInput = {
@@ -80,4 +84,15 @@ export type ReflowInput = {
 
 export type Schedule = {
   [key: string]: WorkOrder[]
+}
+
+export type ScheduleChange = {
+  workOrderId: string;
+  workOrderNumber: string;
+  oldStart: string;
+  oldEnd: string;
+  newStart: string;
+  newEnd: string;
+  delayMinutes: number;
+  reason: string;
 }

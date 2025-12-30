@@ -1,12 +1,17 @@
 import { DateTime } from 'luxon';
-import { WorkCenter, WorkOrder, Shift } from '../reflow/types';
+import { type WorkCenter, type WorkOrder, type Shift } from '../reflow/types.js';
 
 export function calculateEndDateWithShifts(
   workOrder: WorkOrder,
   workCenter: WorkCenter
 ): string {
   let current = DateTime.fromISO(workOrder.data.startDate, { zone: 'utc' });
+  let currentIsoTime = current.toISO()
   let remainingMinutes = workOrder.data.durationMinutes;
+
+  if (!current || !currentIsoTime) {
+    throw new Error(`Unable to create current time from start date for work order ${workOrder.docId}`)
+  }
 
   // Safety check to prevent infinite loops
   let maxIterations = 10000;
@@ -16,10 +21,10 @@ export function calculateEndDateWithShifts(
     iterations++;
 
     // Check if current time is in a maintenance window
-    const isTimeInMaintenanceWindow = isInMaintenanceWindow(current.toISO(), workCenter);
+    const isTimeInMaintenanceWindow = isInMaintenanceWindow(currentIsoTime, workCenter);
     if (isTimeInMaintenanceWindow) {
       // Skip to end of maintenance window
-      const nextAvailable = getNextAvailableTime(current.toISO(), workCenter);
+      const nextAvailable = getNextAvailableTime(currentIsoTime, workCenter);
       current = DateTime.fromISO(nextAvailable, { zone: 'utc' });
       continue;
     }
@@ -66,7 +71,13 @@ export function calculateEndDateWithShifts(
     throw new Error('Infinite loop detected in date calculation');
   }
 
-  return current.toISO();
+  const returnIsoTIme = current.toISO();
+
+  if (!returnIsoTIme) {
+    throw new Error(`Error calculating final iso time for ${workOrder.docId}`);
+  }
+
+  return returnIsoTIme;
 }
 
 export function getShiftForDay(dayOfWeek: number, workCenter: WorkCenter): Shift | null {
@@ -90,7 +101,7 @@ export function getNextAvailableTime(
   workCenter: WorkCenter
 ): string {
   let current = DateTime.fromISO(date, { zone: 'utc' });
-  const { shifts, maintenanceWindows } = workCenter.data;
+  const { maintenanceWindows } = workCenter.data;
 
   // Find the maintenance window we're in
   const inWindow = maintenanceWindows.find(w => {
@@ -107,7 +118,12 @@ export function getNextAvailableTime(
   const shift = getShiftForDay(current.weekday % 7, workCenter);
   if (!shift) {
     current = current.plus({ days: 1 }).startOf('day');
-    return getNextAvailableTime(current.toISO(), workCenter);
+    const noShiftIsoTIme = current.toISO()
+    if (!noShiftIsoTIme) {
+      throw new Error(`Error converting time to iso time for no shift ${workCenter.docId}`);
+    }
+
+    return getNextAvailableTime(noShiftIsoTIme, workCenter);
   }
 
   const shiftStart = current.set({ hour: shift.startHour, minute: 0, second: 0 });
@@ -115,7 +131,13 @@ export function getNextAvailableTime(
     current = shiftStart;
   }
 
-  return current.toISO();
+  const returnIsoTime = current.toISO();
+
+  if (!returnIsoTime) {
+    throw new Error(`Error converting time to iso time for ${workCenter.docId}`);
+  }
+
+  return returnIsoTime;
 }
 
 export function getMinutesDiff(start: string, end: string): number {

@@ -1,5 +1,5 @@
 import { DateTime } from 'luxon'
-import { WorkCenter, WorkOrder, Schedule } from './types';
+import { type WorkCenter, type WorkOrder, type Schedule } from './types.js';
 
 /**
  * Check if two work orders overlap on the same work center
@@ -36,7 +36,7 @@ export function areDependenciesSatisfied(
 
     const depEnd = DateTime.fromISO(dependency.data.endDate, { zone: 'utc' });
 
-    // Check if dependency has finished
+    // Check to see if the dependency has already completed
     if (depEnd > woStart) {
       return false;
     }
@@ -45,27 +45,86 @@ export function areDependenciesSatisfied(
   return true;
 }
 
+/* 
+* Determine if there are any circular dependancies within work order dependencies
+*/
+export function detectCircularDependencies(workOrders: WorkOrder[]): string[] {
+  const errors: string[] = [];
+  const visited = new Set<string>();
+  const recStack = new Set<string>();
+
+  const woMap = new Map(
+    workOrders.map(wo => [wo.docId, wo])
+  );
+
+  const dfs = (woId: string, path: string[]): void => {
+    if (recStack.has(woId)) {
+      errors.push(
+        `Circular dependency detected: ${[...path, woId].join(" → ")}`
+      );
+      return;
+    }
+
+    if (visited.has(woId)) {
+      return;
+    }
+
+    recStack.add(woId);
+
+    const wo = woMap.get(woId);
+    if (wo) {
+      for (const depId of wo.data.dependsOnWorkOrderIds) {
+        dfs(depId, [...path, woId]);
+      }
+    }
+
+    recStack.delete(woId);
+    visited.add(woId);
+  };
+
+  for (const wo of workOrders) {
+    if (!visited.has(wo.docId)) {
+      dfs(wo.docId, []);
+    }
+  }
+
+  return errors;
+}
+
+
 /**
  * Validate all constraints for a schedule
  */
 export function validateSchedule(
   schedule: Schedule,
   workCenters: WorkCenter[]
-): { valid: boolean } {
-  let isValid = true;
+): { valid: boolean, errors: string[] } {
+  const errors: string[] = [];
+
   // Check each work order
   for (const center of Object.keys(schedule)) {
     const workOrders = schedule[center]
+
+    // Check for circular dependencies for each work center schedule group
+    const circularErrors = detectCircularDependencies(workOrders);
+    if (circularErrors.length > 0) {
+      errors.push(...circularErrors);
+    }
+
     for (const wo of workOrders) {
-      // Check work center conflicts
+
+      if (!areDependenciesSatisfied(wo, workOrders)) {
+        errors.push(`Work order ${wo.docId} starts before dependencies complete`);
+      }
+      // Check work center has conflicts
       const conflicts = workOrders.filter(other =>
         other.docId !== wo.docId && hasWorkCenterConflict(wo, other)
       );
 
       if (conflicts.length > 0) {
-        // TODO: Update erro handling
-        console.error('Conflicts found: ', JSON.stringify(conflicts));
-        isValid = false;
+        errors.push(
+          `Work order ${wo.docId} conflicts with ${conflicts.map(c => c.docId).join(', ')} on work center ${wo.data.workCenterId}`
+        );
       }
 
       // Check maintenance windows
@@ -80,13 +139,14 @@ export function validateSchedule(
           const mwEnd = DateTime.fromISO(mw.endDate, { zone: 'utc' });
 
           if (woStart < mwEnd && woEnd > mwStart) {
-            // TODO update error handling for maintenance window
-            isValid = false;
+            errors.push(
+              `Work order ${wo.docId} conflicts with maintenance window on ${wc.data.name}`
+            );
           }
         }
       }
     }
   }
 
-  return { valid: isValid };
+  return { valid: errors.length === 0, errors };
 }

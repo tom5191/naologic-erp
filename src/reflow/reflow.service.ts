@@ -1,6 +1,6 @@
-import { WorkOrder, WorkCenter, ReflowInput, ReflowResult, Schedule } from "./types";
-import { validateSchedule, hasWorkCenterConflict } from "./contraint-checker";
-import { getNextAvailableTime, calculateEndDateWithShifts } from "../utils/date-utils";
+import { type WorkOrder, type WorkCenter, type ScheduleChange, type ReflowResult, type Schedule } from "./types.js";
+import { validateSchedule, hasWorkCenterConflict, detectCircularDependencies } from "./contraint-checker.js";
+import { getNextAvailableTime, calculateEndDateWithShifts, getMinutesDiff } from "../utils/date-utils.js";
 import { DateTime } from 'luxon';
 
 export class ReflowService {
@@ -8,8 +8,9 @@ export class ReflowService {
   private workCenterSchedules: Schedule = {};
   private workCenters: WorkCenter[] = [];
   private workOrders: WorkOrder[] = [];
+  private changes: ScheduleChange[] = [];
 
-  constructor(workCenters, workOrders) {
+  constructor(workCenters: WorkCenter[], workOrders: WorkOrder[]) {
     this.workCenters = workCenters;
     this.workOrders = workOrders;
   }
@@ -17,6 +18,27 @@ export class ReflowService {
   public reflow(): ReflowResult {
     for (let wc of this.workCenters) {
       this.workCenterSchedules[wc.docId] = this.workOrders.filter(wo => wo.data.workCenterId === wc.docId);
+    }
+
+    if (this.workOrders.length === 0) {
+      return {
+        success: false,
+        updatedWorkOrders: {},
+        changes: [],
+        explanation: 'Cannot reflow: no work orders were passed',
+      }
+    }
+
+    // Validate input
+    const circularErrors = detectCircularDependencies(this.workOrders);
+    if (circularErrors.length > 0) {
+      return {
+        success: false,
+        updatedWorkOrders: {},
+        changes: [],
+        explanation: 'Cannot reflow: circular dependencies detected',
+        errors: circularErrors
+      };
     }
 
     // Create a working array that we'll modify as we process
@@ -28,10 +50,25 @@ export class ReflowService {
       processedCount++;
 
       // Take the first order from the working array
-      const order = workingOrders.shift()!;
+      const order: WorkOrder | undefined = workingOrders.shift();
+
+      if (!order) {
+        return {
+          success: false,
+          updatedWorkOrders: {},
+          changes: [],
+          explanation: 'Cannot reflow: no order found in array'
+        }
+      }
+
+      const originalOrder = { ...order, data: { ...order.data } }
+
+      if (!Object.hasOwn(this.schedule, order.data.workCenterId)) {
+        this.schedule[order.data.workCenterId] = [];
+      }
 
       // Check if already processed
-      const hasBeenProcessed = this.schedule[order.data.workCenterId].find(s => s.docId === order.docId);
+      const hasBeenProcessed = this.schedule[order.data.workCenterId]?.find(s => s.docId === order.docId);
       if (hasBeenProcessed) {
         continue;
       }
@@ -41,11 +78,10 @@ export class ReflowService {
 
       if (totalDependencies > 0) {
         let unprocessedDependencies: WorkOrder[] = [];
-        let allDependenciesProcessed = true;
 
         // Check each dependency
         for (let dependencyOrderId of order.data.dependsOnWorkOrderIds) {
-          const dependencyHasBeenProcessed = this.schedule[order.data.workCenterId].find(s => s.docId === dependencyOrderId);
+          const dependencyHasBeenProcessed = this.schedule[order.data.workCenterId]?.find(s => s.docId === dependencyOrderId);
 
           if (dependencyHasBeenProcessed) {
             // Dependency already processed, continue to next dependency
@@ -55,7 +91,6 @@ export class ReflowService {
             const dependencyWorkOrder = this.workOrders.find(wo => wo.docId === dependencyOrderId);
             if (dependencyWorkOrder) {
               unprocessedDependencies.push(dependencyWorkOrder);
-              allDependenciesProcessed = false;
             } else {
               throw new Error(`Dependency ${dependencyOrderId} not found for work order ${order.docId}`);
             }
@@ -63,7 +98,7 @@ export class ReflowService {
         }
 
         // If there are unprocessed dependencies, add them to front of queue
-        if (!allDependenciesProcessed) {
+        if (unprocessedDependencies.length > 0) {
           // Add unprocessed dependencies to the front
           workingOrders.unshift(...unprocessedDependencies);
           // Add current order back after dependencies
@@ -72,11 +107,8 @@ export class ReflowService {
         }
       }
 
-      // All dependencies processed (or no dependencies), process this order
-
       // Skip maintenance work orders (cannot be rescheduled)
       if (order.data.isMaintenance) {
-        this.schedule[order.data.workCenterId].push(order);
         this.addToWorkCenterSchedule(order);
         continue;
       }
@@ -95,14 +127,32 @@ export class ReflowService {
       order.data.startDate = newStartDate;
       order.data.endDate = newEndDate;
 
-      this.schedule[order.data.workCenterId].push(order);
       this.addToWorkCenterSchedule(order);
+
+      // Track changes
+      if (originalOrder.data.startDate !== newStartDate || originalOrder.data.endDate !== newEndDate) {
+        const delayMinutes = getMinutesDiff(originalOrder.data.endDate, newEndDate);
+        this.changes.push({
+          workOrderId: order.docId,
+          workOrderNumber: order.data.workOrderNumber,
+          oldStart: originalOrder.data.startDate,
+          oldEnd: originalOrder.data.endDate,
+          newStart: newStartDate,
+          newEnd: newEndDate,
+          delayMinutes: Math.max(0, delayMinutes),
+          reason: this.determineChangeReason(order, originalOrder, this.schedule[order.data.workCenterId])
+        });
+      }
     }
+
 
     if (processedCount >= maxIterations) {
       return {
         success: false,
         updatedWorkOrders: {},
+        changes: [],
+        explanation: 'Max iterations reached - possible infinite loop or circular dependency',
+        errors: ['Processing exceeded maximum iterations']
       };
     }
 
@@ -112,37 +162,10 @@ export class ReflowService {
     return {
       success: validation.valid,
       updatedWorkOrders: this.schedule,
+      changes: this.changes,
+      explanation: this.generateExplanation(this.changes, validation),
+      errors: validation.errors,
     };
-  }
-
-  /**
-   * Topological sort using DFS
-   */
-  private topologicalSort(workOrders: WorkOrder[]): WorkOrder[] {
-    const sorted: WorkOrder[] = [];
-    const visited = new Set<string>();
-    const woMap = new Map(workOrders.map(wo => [wo.docId, wo]));
-
-    const visit = (woId: string) => {
-      if (visited.has(woId)) return;
-      visited.add(woId);
-
-      const wo = woMap.get(woId);
-      if (!wo) return;
-
-      // Visit dependencies first
-      for (const depId of wo.data.dependsOnWorkOrderIds) {
-        visit(depId);
-      }
-
-      sorted.push(wo);
-    };
-
-    for (const wo of workOrders) {
-      visit(wo.docId);
-    }
-
-    return sorted;
   }
 
   /**
@@ -161,6 +184,10 @@ export class ReflowService {
     // Start with dependency constraints
     let earliestStart = this.getEarliestStartAfterDependencies(workOrder, workCenterSchedule);
 
+    if (!earliestStart) {
+      throw new Error(`Error trying to find earliest start time for work center ${workOrder.data.workCenterId}`);
+    }
+
     // Ensure we're in a valid shift
     earliestStart = getNextAvailableTime(earliestStart, workCenter);
 
@@ -178,7 +205,7 @@ export class ReflowService {
   private getEarliestStartAfterDependencies(
     workOrder: WorkOrder,
     scheduledWorkOrders: WorkOrder[]
-  ): string {
+  ): string | null {
     let latestDependencyEnd = DateTime.fromISO(workOrder.data.startDate, { zone: 'utc' });
 
     for (const depId of workOrder.data.dependsOnWorkOrderIds) {
@@ -237,8 +264,11 @@ export class ReflowService {
         return woEnd > latest ? woEnd : latest;
       }, DateTime.fromISO(currentStart, { zone: 'utc' }));
 
-      // Move start to after the conflict
-      currentStart = getNextAvailableTime(latestConflictEnd.toISO(), workCenter);
+      const latestToIso = latestConflictEnd.toISO()
+      if (latestToIso) {
+        // Move start to after the conflict
+        currentStart = getNextAvailableTime(latestToIso, workCenter);
+      }
 
       attempts++;
     }
@@ -248,10 +278,67 @@ export class ReflowService {
 
   private addToWorkCenterSchedule(workOrder: WorkOrder): void {
     const wcId = workOrder.data.workCenterId;
-    const alreadyAdded = this.schedule[wcId].find(s => s.docId === wcId);
+    const wId = workOrder.docId;
+    const alreadyAdded = this.schedule[wcId].find(s => s.docId === wId);
 
     if (!alreadyAdded) {
       this.schedule[wcId].push(workOrder);
     }
+  }
+
+  private determineChangeReason(
+    newWo: WorkOrder,
+    oldWo: WorkOrder,
+    allWorkOrders: WorkOrder[]
+  ): string {
+    const reasons: string[] = [];
+
+    // Check if delayed by dependencies
+    for (const depId of newWo.data.dependsOnWorkOrderIds) {
+      const dep = allWorkOrders.find(wo => wo.docId === depId);
+      const oldDep = allWorkOrders.find(wo => wo.docId === depId);
+
+      if (dep && oldDep) {
+        const newDepEnd = DateTime.fromISO(dep.data.endDate, { zone: 'utc' });
+        const oldStart = DateTime.fromISO(oldWo.data.startDate, { zone: 'utc' });
+
+        if (newDepEnd > oldStart) {
+          reasons.push(`Dependency ${depId} delayed`);
+        }
+      }
+    }
+
+    // Check if delayed by work center conflict
+    const sameWcOrders = allWorkOrders.filter(wo =>
+      wo.data.workCenterId === newWo.data.workCenterId && wo.docId !== newWo.docId
+    );
+
+    if (reasons.length === 0 && sameWcOrders.length > 0) {
+      reasons.push('Work center conflict');
+    }
+
+    if (reasons.length === 0) {
+      reasons.push('Shift or maintenance constraint');
+    }
+
+    return reasons.join('; ');
+  }
+
+  private generateExplanation(
+    changes: ScheduleChange[],
+    validation: { valid: boolean; errors: string[] }
+  ): string {
+    if (!validation.valid) {
+      return `Schedule validation failed: ${validation.errors.join('; ')}`;
+    }
+
+    if (changes.length === 0) {
+      return 'No changes required - schedule is already valid';
+    }
+
+    const totalDelay = changes.reduce((sum, c) => sum + c.delayMinutes, 0);
+
+    return `Rescheduled ${changes.length} work order(s) with total delay of ${totalDelay} minutes. ${validation.valid ? 'All constraints satisfied.' : 'Validation issues remain.'
+      }`;
   }
 }
