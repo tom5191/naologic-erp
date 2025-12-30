@@ -1,8 +1,17 @@
-import { ReflowService } from "./reflow/reflow.service";
+import { ReflowService } from "./reflow/reflow.service.js";
+import { type WorkCenter, type WorkOrder } from "./reflow/types.js";
 
-import WorkCentersJSON from './data/work-centers.json'
-import WorkOrdersJSON from './data/work-orders.json'
+// import SmallWorkOrdersJSON from './data/small-orders.json' with {type: 'json'}
+import WorkCentersJSON from './data/work-centers.json' with {type: 'json'}
 
-const rs = new ReflowService(WorkCentersJSON, WorkOrdersJSON)
+// Test circular dependencies
+// import CircularDependencyJson from './data/work-orders-75-with-cycles.json' with {type: 'json'}
+// const rs = new ReflowService(WorkCentersJSON as WorkCenter[], CircularDependencyJson as WorkOrder[])
 
-console.log(rs.reflow());
+// Test single work center
+import SingleWorkCenterJSON from './data/work-orders-75.json' with {type: 'json'}
+const rs = new ReflowService(WorkCentersJSON as WorkCenter[], SingleWorkCenterJSON as WorkOrder[]);
+
+const results = rs.reflow()
+
+console.log(`results: ${JSON.stringify(results, null, 3)}`);
